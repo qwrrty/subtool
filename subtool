@@ -1,0 +1,174 @@
+#! /usr/bin/env python
+
+# Copyright 2019 Tim Pierce
+# 
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# ------------------------------
+
+# subtool -- the subtitle tweaker
+#
+# Shifts subtitles in a subtitled file backward or forward by a set
+# time span.  Writes revised subtitle file to standard output.
+#
+# Useful for adapting a SRT subtitle track to a video track with
+# different timing.
+#
+# Usage:
+#
+# subtool [--skip N] [--adjust [-]MM:SS] subtitle-file
+#
+# --skip N omits the first N subtitles from the output
+# --adjust [-]MM:SS shifts all subtitles by the specified
+#    number of minutes and seconds. A leading "-" specifies
+#    that subtitles should be moved earlier in the video;
+#    otherwise, they will be shifted later.
+
+
+import argparse
+import re
+
+import arrow
+
+
+class Subtitle(object):
+
+    # A class representing a single subtitle, which is represented
+    # by a stanza in this format:
+    #
+    # 453
+    # 00:33:54,867 --> 00:33:56,926
+    # One hears a great deal about Rick
+    # in Casablanca.
+
+    def __init__(self, index, start, end, subs):
+        self.index = index
+        self.start = start
+        self.end = end
+        self.subs = subs
+
+    def __str__(self):
+        return "\n".join(
+            [
+                str(self.index),
+                "{} --> {}".format(
+                    Subtitle.strtime(self.start),
+                    Subtitle.strtime(self.end),
+                )
+            ] + self.subs
+        )
+    
+    @staticmethod
+    def parse(lines):
+        index = int(lines[0])
+        (start, end) = lines[1].split(" --> ")
+        start_time = Subtitle.parse_time(start)
+        end_time = Subtitle.parse_time(end)
+        subs = lines[2:]
+        return Subtitle(index, start_time, end_time, subs)
+
+    @staticmethod
+    def parse_time(timestr):
+        # Parse a time in the format "hh:mm:ss,SSS"
+        (hms_time, usec) = timestr.split(",")
+        t = arrow.Arrow.strptime(hms_time, "%H:%M:%S")
+        t = t.replace(microsecond=int(usec)*1000)
+        return t
+
+    @staticmethod
+    def strtime(t):
+        # Print an Arrow time object in the format "hh:mm:ss,SSS"
+        return "{},{:03d}".format(t.strftime("%H:%M:%S"), t.microsecond/1000)
+    
+
+class Adjuster(object):
+
+    # This class implements the process for adjusting subtitles in a
+    # SRT file.
+    
+    def __init__(self, skip, adjust, srtfile):
+        self.skip = skip
+        self.srtfile = srtfile
+
+        # Translate adjustment into a dict suitable for arrow.shift
+        m = re.match("(-?)(\d\d):(\d\d)", adjust)
+        multiplier = -1 if m.group(1) == "-" else 1
+        minute = int(m.group(2))
+        second = int(m.group(3))
+        self.adjust = {
+            "minutes": minute * multiplier,
+            "seconds": second * multiplier,
+        }
+
+    def process(self):
+        with open(self.srtfile, mode="r") as f:
+            stanza = []
+            for line in f:
+                line = line.decode("utf-8-sig").strip()
+                if len(line) == 0:
+                    if stanza:
+                        result = self.process_stanza(stanza)
+                        if result:
+                            print result.__str__().encode("utf-8")
+                            print ""
+                        stanza = []
+                else:
+                    stanza.append(line)
+
+    def process_stanza(self, stanza):
+        s = Subtitle.parse(stanza)
+        
+        # Are we past the skip point?
+        if s.index <= self.skip:
+            return
+
+        # Adjust the times
+        s.index -= self.skip
+        s.start = s.start.shift(**self.adjust)
+        s.end = s.end.shift(**self.adjust)
+
+        # If the subtitle time is less than the adjustment
+        # value, it will manifest as the "year" being less than
+        # 1900 or earlier.
+        if s.start.year < 1900 or s.end.year < 1900:
+            return
+        
+        return s
+    
+        
+def main():
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument(
+        "--skip",
+        help="skip the first N stanzas",
+        type=int,
+        default=0,
+    )
+    argparser.add_argument(
+        "--adjust",
+        help="time to adjust by (hh:mm:ss,mmm)",
+        type=str,
+    )
+    argparser.add_argument(
+        "srtfile",
+        help="subtitle file",
+    )
+    args = argparser.parse_args()
+
+    adjuster = Adjuster(skip=args.skip,
+                        adjust=args.adjust,
+                        srtfile=args.srtfile)
+    adjuster.process()
+    
+
+if __name__ == "__main__":
+    main()
+
